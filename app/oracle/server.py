@@ -23,7 +23,10 @@ from . import lore
 
 WEB = os.path.join(REPO, "app", "web")
 ART = os.path.join(REPO, "cards", "art")
-PORT = int(os.environ.get("ORACLE_PORT", "8777"))
+# $PORT is what Render/Fly/Railway/Heroku-alikes inject for a hosted web service;
+# ORACLE_PORT is this app's own long-standing knob (used on the Spark). Prefer
+# whichever the platform actually sets, so one image runs unmodified on both.
+PORT = int(os.environ.get("PORT") or os.environ.get("ORACLE_PORT", "8777"))
 LLM_SINGLETON = make_llm()
 ART_RE = re.compile(r"^(shell|roots|trunk|branches)-\d{2}\.png$")
 WEBIMG_RE = re.compile(r"^((shell|roots|trunk|branches)-\d{2}|back)\.jpg$")

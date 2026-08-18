@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: turtle-oracle
+    runtime: python
+    plan: free
+    buildCommand: "true"
+    startCommand: "PYTHONPATH=app python3 -m oracle.server"
+    healthCheckPath: /api/health
+    envVars:
+      - key: ORACLE_LLM_BACKEND
+        value: cloud
+      - key: ORACLE_CLOUD_KEY
+        sync: false
+      - key: ORACLE_CLOUD_MODEL
+        value: openai/gpt-oss-20b
