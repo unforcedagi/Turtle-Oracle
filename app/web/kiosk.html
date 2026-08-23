@@ -272,9 +272,36 @@
 const $=id=>document.getElementById(id);
 const SLOTS=["roots","trunk","branches"];
 const SLOTCAP={roots:"Face",trunk:"Stand",branches:"Reach"};
-let SID=null, SPOKEN=true, VOICE=null, IDLE=null, CARD_IDS="";
+let SID=null, SPOKEN=true, VOICE=null, IDLE=null, CARD_IDS="", SESSION_GEN=0;
 /* Which station this tablet is, from ?kiosk=1 — routes the print to its own printer. */
 const KIOSK=new URLSearchParams(location.search).get("kiosk")||"";
+const SESSION_KEY="turtle-oracle.session"+(KIOSK?"."+KIOSK:"");
+
+/* The server already keeps the séance. Keep its id and the last complete UI step too, so
+   Android reclaiming/reloading Fully does not turn a live reading into a new seeker. */
+function rememberStep(e){
+  if(!SID||!e||e.session!==SID||e.error) return;
+  try{ localStorage.setItem(SESSION_KEY,JSON.stringify({sid:SID,step:e})); }catch(err){}
+}
+function forgetStep(){ try{ localStorage.removeItem(SESSION_KEY); }catch(err){} }
+function restoreStep(){
+  let saved=null;
+  try{ saved=JSON.parse(localStorage.getItem(SESSION_KEY)||"null"); }catch(err){ forgetStep(); }
+  const stages=["naming","tale_naming","tale_listening","tale_told","weather","stem","stones","proposed","accepted"];
+  if(!saved||!saved.sid||!saved.step||saved.step.session!==saved.sid
+      ||!stages.includes(saved.step.stage)||(saved.step.stage==="accepted"&&!saved.step.quest)){
+    forgetStep(); return false;
+  }
+  SID=saved.sid; SESSION_GEN++;
+  show("seance"); resetSeance();
+  if(saved.step.stage==="accepted"&&saved.step.quest) renderQuest(saved.step);
+  else {
+    handle(saved.step);
+    if(["naming","tale_naming","tale_listening"].includes(saved.step.stage))
+      $('askpanel').classList.add("on");
+  }
+  return true;
+}
 
 /* ---------- voice of the turtle ---------- */
 /* Ranks across engines. macOS ships Daniel/Alex/Oliver; the Galaxy Tabs ship Google TTS
@@ -338,9 +365,11 @@ function toast(msg,ms=3400){ $('toast').textContent=msg; $('toast').classList.ad
   setTimeout(()=>$('toast').classList.remove("on"),ms); }
 
 async function wake(mode){
+  discardRecording(); SESSION_GEN++; SID=null; forgetStep();
   show("seance"); resetSeance();
   try{
     const e=await post("start",{mode:mode||"seek"}); SID=e.session;
+    rememberStep(e);
     const dur=incant($('says'),e.say,110); speak(e.say);
     setTimeout(()=>$('askpanel').classList.add("on"), Math.min(dur,2600));
   }catch(err){ incant($('says'),"The Turtle is asleep — the camp server isn't answering. Find a turtle."); }
@@ -384,12 +413,16 @@ function hideAux(){ $('wgrid').classList.remove("on"); $('stemline').classList.r
 /* one router for every séance event */
 async function handle(e){
   T_ASK=Date.now();
+  if(e.error){
+    if(e.stage==="gone") resetAll();
+    return toast(e.error);
+  }
+  rememberStep(e);
   if(e.stage==="weather") return renderWeather(e);
   if(e.stage==="stem") return renderStem(e);
   if(e.stage==="stones") return renderStones(e);
   if(e.stage==="proposed"){ $('askpanel').classList.remove("on"); hideAux(); return thePull(e); }
   if(e.stage==="tale_told") return taleTold(e);
-  if(e.error) return toast(e.error);
   incant($('says'),e.say,110); speak(e.say);
 }
 
@@ -556,7 +589,8 @@ $('accept').addEventListener('click', async ()=>{
   $('accept').textContent="⏳  the Turtle seals it…";
   try{
     const e=await post("accept",{session:SID});
-    if(e.quest){ renderQuest(e); } else toast(e.error||"The Tree hesitates — try again.");
+    if(e.quest){ rememberStep(e); renderQuest(e); }
+    else toast(e.error||"The Tree hesitates — try again.");
   }catch(err){ toast("The Turtle lost the thread — try once more."); }
   $('accept').disabled=false;
   $('accept').textContent="⚔  I accept this quest";
@@ -595,6 +629,7 @@ function renderQuest(e){
   show("quest");
   setTimeout(()=>$('parch').classList.add("on"),80);
   speak(e.say);
+  pokeIdle();  // a seal gets its own four-minute handoff window, even after a slow LLM call
 }
 $('print').addEventListener('click', async ()=>{
   $('print').disabled=true;
@@ -610,35 +645,61 @@ $('print').addEventListener('click', async ()=>{
 $('again').addEventListener('click', resetAll);
 
 /* ---------- listening: the Turtle's own ears (local whisper on the camp brain) ---------- */
-let REC=null, CHUNKS=[], LISTENING=false;
+let REC=null, REC_STREAM=null, TRANSCRIBE=null, CHUNKS=[], LISTENING=false;
+function discardRecording(){
+  clearTimeout(micToggle._guard);
+  if(TRANSCRIBE){ TRANSCRIBE.abort(); TRANSCRIBE=null; }
+  if(REC){
+    REC.ondataavailable=null; REC.onstop=null;
+    try{ if(REC.state!=="inactive") REC.stop(); }catch(e){}
+  }
+  if(REC_STREAM) REC_STREAM.getTracks().forEach(t=>t.stop());
+  REC=null; REC_STREAM=null; CHUNKS=[]; LISTENING=false;
+  $('mic').classList.remove("listening"); $('mic').textContent="🎙";
+}
 async function micToggle(){
   if(LISTENING){ try{REC.stop();}catch(e){} return; }
+  if(TRANSCRIBE) return;
   if(!navigator.mediaDevices||!window.MediaRecorder){
     toast("No microphone on this device — write it instead."); return; }
   try{
+    const sid=SID, generation=SESSION_GEN;
     const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    if(sid!==SID||generation!==SESSION_GEN){ stream.getTracks().forEach(t=>t.stop()); return; }
     const mime=["audio/webm;codecs=opus","audio/webm","audio/mp4"]
       .find(m=>MediaRecorder.isTypeSupported(m))||"";
-    REC=new MediaRecorder(stream, mime?{mimeType:mime}:undefined);
+    const recorder=new MediaRecorder(stream, mime?{mimeType:mime}:undefined);
+    REC=recorder; REC_STREAM=stream;
     CHUNKS=[];
-    REC.ondataavailable=e=>{ if(e.data&&e.data.size)CHUNKS.push(e.data); };
-    REC.onstop=async()=>{
+    recorder.ondataavailable=e=>{ if(e.data&&e.data.size)CHUNKS.push(e.data); };
+    recorder.onstop=async()=>{
+      clearTimeout(micToggle._guard);
       stream.getTracks().forEach(t=>t.stop());
+      if(REC===recorder){ REC=null; REC_STREAM=null; }
       LISTENING=false; $('mic').classList.remove("listening");
+      if(sid!==SID||generation!==SESSION_GEN) return;
       AUDIO_SECS=(Date.now()-(micToggle._t0||Date.now()))/1000; USED_MIC=true;
-      const blob=new Blob(CHUNKS,{type:(REC.mimeType||"audio/webm")});
+      const blob=new Blob(CHUNKS,{type:(recorder.mimeType||"audio/webm")});
       if(blob.size<1500){ $('mic').textContent="🎙"; return; }
       $('mic').textContent="…";
+      let controller=null;
       try{
+        controller=new AbortController(); TRANSCRIBE=controller;
         const r=await fetch("/api/transcribe",{method:"POST",
-          headers:{"Content-Type":blob.type.split(";")[0]},body:blob});
+          headers:{"Content-Type":blob.type.split(";")[0]},body:blob,signal:controller.signal});
         const d=await r.json();
+        if(TRANSCRIBE===controller) TRANSCRIBE=null;
+        if(sid!==SID||generation!==SESSION_GEN) return;
         if(d.text) $('q').value=($('q').value+" "+d.text).trim();
         else toast("The Turtle couldn't make out the words — write them instead.");
-      }catch(e){ toast("The Turtle's ears are unreachable — write it instead."); }
+      }catch(e){
+        if(TRANSCRIBE===controller) TRANSCRIBE=null;
+        if(e.name!=="AbortError"&&sid===SID&&generation===SESSION_GEN)
+          toast("The Turtle's ears are unreachable — write it instead.");
+      }
       $('mic').textContent="🎙";
     };
-    REC.start(); LISTENING=true; micToggle._t0=Date.now();
+    recorder.start(); LISTENING=true; micToggle._t0=Date.now();
     $('mic').classList.add("listening"); $('mic').textContent="■";
     clearTimeout(micToggle._guard);
     micToggle._guard=setTimeout(()=>{ if(LISTENING) try{REC.stop();}catch(e){} },60000);
@@ -652,8 +713,9 @@ $('attract').addEventListener('click', ()=>wake("seek"));
 $('returned').addEventListener('click', ev=>{ ev.stopPropagation(); wake("tale"); });
 $('taledone').addEventListener('click', ev=>{ ev.stopPropagation(); resetAll(); });
 $('offer').addEventListener('click', offer);
-loadLore();
+if(!restoreStep()) loadLore();
 $('q').addEventListener('keydown',e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); offer(); } });
+window.addEventListener("pagehide",discardRecording);
 
 /* motes */
 for(let i=0;i<9;i++){ const m=document.createElement("div"); m.className="mote";
@@ -662,10 +724,12 @@ for(let i=0;i<9;i++){ const m=document.createElement("div"); m.className="mote";
   document.body.appendChild(m); }
 
 /* idle: the oracle goes back to sleep */
-function resetAll(){ speechSynthesis&&speechSynthesis.cancel(); SID=null; resetSeance();
+function resetAll(){ speechSynthesis&&speechSynthesis.cancel(); discardRecording();
+  SESSION_GEN++; SID=null; forgetStep(); resetSeance();
   $('parch').classList.remove("on"); show("attract"); loadLore(); }
-function pokeIdle(){ clearTimeout(IDLE); IDLE=setTimeout(()=>{
-  if(!$('attract').classList.contains("on")) resetAll(); }, 240000); }
+function pokeIdle(){ clearTimeout(IDLE);
+  const wait=$('quest').classList.contains("on")?240000:600000;
+  IDLE=setTimeout(()=>{ if(SID) resetAll(); },wait); }
 ["click","touchstart","keydown"].forEach(ev=>document.addEventListener(ev,pokeIdle,{passive:true}));
 pokeIdle();
 </script>
