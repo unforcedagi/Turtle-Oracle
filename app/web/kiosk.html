@@ -321,26 +321,77 @@ function pickVoice(){
   VOICE=vs[0]||null;
 }
 if("speechSynthesis" in window){ pickVoice(); speechSynthesis.onvoiceschanged=pickVoice; }
-/* sentence-by-sentence: long utterances stall some engines, and the gaps ARE the turtle */
-function speak(text,cb){
-  if(!SPOKEN||!("speechSynthesis" in window)){ if(cb)cb(); return; }
-  speechSynthesis.cancel();
-  const parts=(text.replace(/[“”"]/g,"").match(/[^.!?…]+[.!?…]+['”]?|[^.!?…]+$/g)||[text])
+let SERVER_AUDIO=null, SERVER_AUDIO_URL=null, SPEAK_GEN=0, SPEAK_DONE=null;
+function speechParts(text){
+  return (text.replace(/[“”"]/g,"").match(/[^.!?…]+[.!?…]+['”]?|[^.!?…]+$/g)||[text])
     .map(s=>s.trim()).filter(Boolean);
-  document.body.classList.add("speaking");
-  let done=false;
-  const finish=()=>{ if(done)return; done=true;
-    document.body.classList.remove("speaking"); if(cb)cb(); };
+}
+function releaseAudio(){
+  if(SERVER_AUDIO){ SERVER_AUDIO.pause(); SERVER_AUDIO.src=""; SERVER_AUDIO=null; }
+  if(SERVER_AUDIO_URL){ URL.revokeObjectURL(SERVER_AUDIO_URL); SERVER_AUDIO_URL=null; }
+}
+function stopVoice(){
+  SPEAK_GEN++; releaseAudio();
+  if("speechSynthesis" in window) speechSynthesis.cancel();
+  const done=SPEAK_DONE; SPEAK_DONE=null;
+  document.body.classList.remove("speaking");
+  if(done) done();
+}
+/* Browser TTS remains the no-dependencies/offline fallback if Kokoro is disabled or fails. */
+function browserSpeak(parts,token,finish){
+  if(!("speechSynthesis" in window)) return finish();
   parts.forEach((p,i)=>{
     const u=new SpeechSynthesisUtterance(p);
     u.rate=.87; u.pitch=.62; if(VOICE)u.voice=VOICE;
     if(i===parts.length-1) u.onend=u.onerror=finish;
     speechSynthesis.speak(u);
   });
-  setTimeout(finish, text.split(/\s+/).length*550+4000);  // engine-death safety net
+  const words=parts.join(" ").split(/\s+/).length;
+  setTimeout(()=>{ if(token===SPEAK_GEN)finish(); },words*550+4000);
+}
+async function playServerLine(line,token){
+  if(!("Audio" in window)) return false;
+  const ctl=new AbortController(), timeout=setTimeout(()=>ctl.abort(),15000);
+  try{
+    const r=await fetch("/api/speak",{method:"POST",signal:ctl.signal,
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({text:line})});
+    if(!r.ok) return false;
+    const blob=await r.blob();
+    if(token!==SPEAK_GEN||!SPOKEN) return true;
+    SERVER_AUDIO_URL=URL.createObjectURL(blob);
+    SERVER_AUDIO=new Audio(SERVER_AUDIO_URL);
+    const played=await new Promise(resolve=>{
+      let settled=false;
+      const end=ok=>{ if(settled)return; settled=true; resolve(ok); };
+      SERVER_AUDIO.onended=()=>end(true); SERVER_AUDIO.onerror=()=>end(false);
+      const started=SERVER_AUDIO.play();
+      if(started&&started.catch) started.catch(()=>end(false));
+    });
+    releaseAudio(); return played;
+  }catch(err){ return false; }
+  finally{ clearTimeout(timeout); }
+}
+async function speak(text,cb){
+  stopVoice();
+  if(!SPOKEN){ if(cb)cb(); return; }
+  const token=SPEAK_GEN, parts=speechParts(text);
+  document.body.classList.add("speaking");
+  let done=false;
+  const finish=()=>{ if(done)return; done=true; releaseAudio();
+    if(SPEAK_DONE===finish) SPEAK_DONE=null;
+    document.body.classList.remove("speaking"); if(cb)cb(); };
+  SPEAK_DONE=finish;
+  let i=0;
+  for(;i<parts.length;i++){
+    if(token!==SPEAK_GEN||!SPOKEN) return;
+    if(!await playServerLine(parts[i],token)) break;
+  }
+  if(token!==SPEAK_GEN||!SPOKEN) return;
+  if(i<parts.length) browserSpeak(parts.slice(i),token,finish);
+  else finish();
 }
 $('snd').addEventListener('click',()=>{ SPOKEN=!SPOKEN; $('snd').textContent=SPOKEN?"🔊":"🔇";
-  if(!SPOKEN) speechSynthesis.cancel(); });
+  if(!SPOKEN) stopVoice(); });
 
 /* ---------- word-by-word incantation ---------- */
 function incant(el,text,msPerWord=120){
@@ -495,7 +546,7 @@ async function offer(){
 /* wait on the spoken voice when sound is on, else on the written reveal */
 function speakOr(text,fallbackMs){
   return new Promise(res=>{
-    if(SPOKEN && "speechSynthesis" in window) speak(text,res);
+    if(SPOKEN) speak(text,res);
     else setTimeout(res,fallbackMs);
   });
 }
@@ -715,7 +766,7 @@ $('taledone').addEventListener('click', ev=>{ ev.stopPropagation(); resetAll(); 
 $('offer').addEventListener('click', offer);
 if(!restoreStep()) loadLore();
 $('q').addEventListener('keydown',e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); offer(); } });
-window.addEventListener("pagehide",discardRecording);
+window.addEventListener("pagehide",()=>{ discardRecording(); stopVoice(); });
 
 /* motes */
 for(let i=0;i<9;i++){ const m=document.createElement("div"); m.className="mote";
@@ -724,7 +775,7 @@ for(let i=0;i<9;i++){ const m=document.createElement("div"); m.className="mote";
   document.body.appendChild(m); }
 
 /* idle: the oracle goes back to sleep */
-function resetAll(){ speechSynthesis&&speechSynthesis.cancel(); discardRecording();
+function resetAll(){ stopVoice(); discardRecording();
   SESSION_GEN++; SID=null; forgetStep(); resetSeance();
   $('parch').classList.remove("on"); show("attract"); loadLore(); }
 function pokeIdle(){ clearTimeout(IDLE);

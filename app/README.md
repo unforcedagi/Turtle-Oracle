@@ -48,3 +48,24 @@ curl -L -o app/models/ggml-base.en.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
 The kiosk records in the browser and POSTs to `/api/transcribe` (whisper.cpp, ~0.6 s warm).
+
+## Voice (optional local Kokoro)
+
+The kiosk always retains the tablet's built-in browser voice. For a higher-quality voice,
+install Kokoro and SoundFile plus the system `espeak-ng` package while internet is available,
+then pre-warm the model once before going offline:
+
+```bash
+python3 -m pip install 'kokoro>=0.9.4' soundfile
+# Ubuntu/Debian: sudo apt-get install espeak-ng
+ORACLE_TTS_BACKEND=kokoro PYTHONPATH=app python3 -c \
+  'from oracle.voice import KokoroVoice; print(len(KokoroVoice().synthesize("The Turtle wakes.")))'
+```
+
+Run the service with `ORACLE_TTS_BACKEND=kokoro`. Optional controls are
+`ORACLE_TTS_VOICE` (default `bm_george`), `ORACLE_TTS_SPEED` (default `0.86`),
+`ORACLE_TTS_DEVICE` (default `cpu`; use `cuda` only after measuring contention with Ollama),
+and `ORACLE_TTS_CACHE_LINES` (default `192`, memory-only). The kiosk requests one spoken line
+at a time from `/api/speak`; any load, synthesis, network, or playback failure immediately
+falls back to browser speech. Dynamic WAV responses are marked `no-store` because readings
+can contain a seeker's words.

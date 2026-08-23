@@ -20,11 +20,13 @@ from . import printer
 from . import session
 from . import ears
 from . import lore
+from . import voice
 
 WEB = os.path.join(REPO, "app", "web")
 ART = os.path.join(REPO, "cards", "art")
 PORT = int(os.environ.get("ORACLE_PORT", "8777"))
 LLM_SINGLETON = make_llm()
+VOICE_SINGLETON = voice.KokoroVoice()
 ART_RE = re.compile(r"^(shell|roots|trunk|branches)-\d{2}\.png$")
 WEBIMG_RE = re.compile(r"^((shell|roots|trunk|branches)-\d{2}|back)\.jpg$")
 
@@ -108,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
     # HTTP/1.0 (connection closes per request) + threading = robust; no keep-alive edge cases.
     timeout = 20  # cap a slow client's request read so a thread can't hang forever
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", cache=None):
         if isinstance(body, (dict, list)):
             body = json.dumps(body).encode("utf-8")
         elif isinstance(body, str):
@@ -118,10 +120,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             # never cache HTML/API (so fixes land on refresh); images/pdf may cache
-            if ctype.startswith("text/html") or ctype == "application/json":
-                self.send_header("Cache-Control", "no-store")
-            else:
-                self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Cache-Control", cache or
+                             ("no-store" if ctype.startswith("text/html") or
+                              ctype == "application/json" else "public, max-age=86400"))
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -171,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
                                                        .replace("LLM", "ollama"),
                 "model": LLM_SINGLETON.model,
                 "ears": ears.available(),
+                "voice": VOICE_SINGLETON.status(),
                 "readings": tiers,
                 # the number to look at: if this is climbing, the Turtle has gone dumb
                 # and is hiding it behind a very convincing template
@@ -250,6 +252,21 @@ class Handler(BaseHTTPRequestHandler):
             if text is None:
                 return self._send(501, {"error": "the Turtle has no ears on this machine"})
             return self._send(200, {"text": text})
+        if path == "/api/speak":
+            try:
+                text = (json.loads(raw or b"{}").get("text") or "").strip()
+            except Exception:
+                text = ""
+            if not text:
+                return self._send(400, {"error": "no text"})
+            try:
+                wav = VOICE_SINGLETON.synthesize(text)
+            except ValueError as exc:
+                return self._send(400, {"error": str(exc)})
+            except voice.VoiceUnavailable:
+                return self._send(503, {"error": "the Turtle's deeper voice is unavailable"})
+            # Readings contain the seeker's words; never let a browser or proxy retain them.
+            return self._send(200, wav, "audio/wav", cache="no-store")
         if path.startswith("/api/session/"):
             try:
                 body = json.loads(raw or b"{}")
@@ -307,11 +324,20 @@ def _warm_keeper():
         time.sleep(WARM_INTERVAL)
 
 
+def _warm_voice():
+    try:
+        VOICE_SINGLETON.warm()
+    except voice.VoiceUnavailable:
+        pass
+
+
 def main():
     print(f"🐢  Terrible Turtle Oracle at http://localhost:{PORT}")
     print(f"    LLM (Ollama {LLM_SINGLETON.model}): {'available' if LLM_SINGLETON.available() else 'OFF — using offline weave'}")
     print(f"    Ears (whisper.cpp): {'available' if ears.available() else 'OFF — typed input only'}")
+    print(f"    Voice: {VOICE_SINGLETON.status()['backend']} ({VOICE_SINGLETON.voice})")
     threading.Thread(target=_warm_keeper, daemon=True).start()
+    threading.Thread(target=_warm_voice, daemon=True).start()
     OracleServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
