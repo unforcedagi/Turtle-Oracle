@@ -1,6 +1,7 @@
 """Weave the three cards into one reading + one adventure. LLM -> template fallback."""
 import json
 import os
+import re
 
 from .deck import REPO
 
@@ -30,6 +31,8 @@ SYSTEM = (
     "VOICE RULES — never break them:\n"
     "- Speak TO the seeker: 'you', present tense. Never talk about them in third person.\n"
     "- Short declarative sentences. Let the important lines land short and hard.\n"
+    "- This is spoken aloud. Write for the ear: sentences under 18 words; clean pauses; no semicolons, "
+    "parentheses, headings, bullets, or throat-clearing.\n"
     "- Warm, dry wit with a little bite. Never cruel. Never saccharine. No mystical fluff.\n"
     "- Concrete over abstract: name real things — dust, shade, ice, the trash fence, sunrise, bikes.\n"
     "- Metaphors come ONLY from: shells, slowness, teeth and biting, roots/trunk/branches, dust, "
@@ -79,7 +82,8 @@ def weave_llm(question, cards, llm, located=None, context=""):
         "inevitable. For each card, take one EXACT word or phrase the seeker said and one image "
         "from the card (use its essence and bridge lines) and tie them into one thought. Never "
         "apologize for a card or call it random.\n\n"
-        "Weave the three into ONE reading (about 130-170 words) spoken directly TO the seeker in the "
+        "Weave the three into ONE reading (90-120 words, or 60-85 when CONTEXT asks for grounding) "
+        "spoken directly TO the seeker in the "
         "Turtle's voice, honoring the REGISTER in CONTEXT. Move as one connected thought about THEIR "
         "words: what to face -> how to stand -> what to reach for. Fold one card's shadow in as a plain "
         "warning, in your own words — never write the word 'shadow', never write 'the root/trunk/branch "
@@ -88,8 +92,9 @@ def weave_llm(question, cards, llm, located=None, context=""):
         "quest below. If CONTEXT says the seeker is here with a partner or friends, the reading should "
         "sound like it knows that — not describe someone facing this alone. End the reading by handing "
         "them a choice, not a prophecy.\n\n"
-        "Then give ONE concrete quest at Burning Man (use the cards' seed lines as raw material), "
-        "built on these rules:\n"
+        "Then give ONE concrete quest at Burning Man in 75-110 words (use the cards' seed lines as raw "
+        "material). It will also be spoken aloud: one short opening, then exactly three compact moves "
+        "introduced as First, Second, Third. No headings or bullets. Build it on these rules:\n"
         "- THE CROSSING: find the thing the seeker confessed they avoid, don't do, or secretly want — "
         "the heart of the quest makes them do exactly that. Not visit it. Do it.\n"
         "- THE ARC: the FACE move is done alone and involves a hard truth; the STAND move is a presence "
@@ -134,28 +139,43 @@ def _opener():
     return "In the deep night, three moves — and if your legs hold, end it facing the sunrise."
 
 
+def _first_sentence(text):
+    text = (text or "").strip()
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text) if p.strip()]
+    return parts[0] if parts else text
+
+
+def _short_words(text, limit):
+    words = (text or "").split()
+    if len(words) <= limit:
+        return " ".join(words)
+    return " ".join(words[:limit]).rstrip(" ,;:—-") + "…"
+
+
 def weave_fallback(question, cards, located=None):
     located = located or {}
     r, t, b = cards["roots"], cards["trunk"], cards["branches"]
+    warning = _first_sentence(t.get("shadow") or r.get("shadow") or b.get("shadow"))
+    question_short = _short_words(question, 12).rstrip(".!?")
+    question_quote = f"“{question_short}”" if question_short.endswith("…") else f"“{question_short}.”"
     reading = (
-        f"You came asking, and the Tree answered in three parts, so hear them as one. "
-        f"First, what to face. {r['reading']} "
-        f"Now, where you stand. {t['reading']} "
-        f"And what to grow toward. {b['reading']} "
-        f"Move slow through all three — face “{r['name']},” plant your feet in “{t['name']},” "
-        f"then bite down on “{b['name']}.”"
+        f"You brought the Turtle this: {question_quote} Hear the answer as one. "
+        f"{_first_sentence(r['reading'])} {_first_sentence(t['reading'])} "
+        f"{_first_sentence(b['reading'])} Mind the teeth: {warning} "
+        "Nothing here predicts you. Choose what you will face, what you will stand in, and what you "
+        "will reach for. Then bite."
     )
 
-    def move(label, c, realm):
-        where = located.get(realm, {}).get("directions", "")
-        tail = f" → {where}" if where else ""
-        return f"{label} {c['real_2026']['name']} — {_lower_first(c['turtle_dare'])}{tail}"
+    def move(ordinal, c, realm):
+        where = located.get(realm, {}).get("directions", "").replace("&", "and")
+        tail = f" The map says {where}." if where else ""
+        return f"{ordinal}. {c['turtle_dare'].strip()}{tail}"
 
     adventure = (
         _opener() + " "
-        + move("Begin at", r, "roots") + " "
-        + move("Then, where you stand:", t, "trunk") + " "
-        + move("Finish by reaching,", b, "branches")
+        + move("First", r, "roots") + " "
+        + move("Second", t, "trunk") + " "
+        + move("Third", b, "branches")
     )
     return {"reading": reading, "adventure": adventure}
 

@@ -285,22 +285,69 @@ def _followup_llm(shares, llm):
     return _clean_line(llm.generate(prompt, system=SYSTEM, timeout=T_SHORT), max_words=32)
 
 
+def _seeker_words(sess):
+    """Return only words the seeker actually supplied, without UI stems or stone labels."""
+    stem = WEATHERS.get(sess.get("weather"), {}).get("stem", "").strip()
+    spoken = []
+    for share in sess.get("shares", []):
+        text = (share or "").strip()
+        if text.startswith("I am carrying:"):
+            continue
+        if stem and text.startswith(stem):
+            text = text[len(stem):].strip()
+        if text:
+            spoken.append(text)
+    return spoken
+
+
+def _quote_tokens(text):
+    return re.findall(r"[\w’'-]+", text or "", flags=re.UNICODE)
+
+
+def _quote_windows(spoken):
+    """Make up to three distinct, natural 3-8-word quote candidates per answer."""
+    windows = []
+    for answer in spoken:
+        words = _quote_tokens(answer)
+        if len(words) < 3:
+            continue
+        width = min(7, len(words))
+        starts = (0, max(0, (len(words) - width) // 2), max(0, len(words) - width))
+        for start in starts:
+            phrase = " ".join(words[start:start + width])
+            if phrase not in windows:
+                windows.append(phrase)
+    return windows
+
+
+def _valid_echo(line, spoken):
+    quotes = re.findall(r"“([^”]+)”", line or "")
+    if len(quotes) != 1 or not 3 <= len(_quote_tokens(quotes[0])) <= 8:
+        return False
+    phrase = " ".join(w.casefold() for w in _quote_tokens(quotes[0]))
+    return any(phrase in " ".join(w.casefold() for w in _quote_tokens(source))
+               for source in spoken)
+
+
 def _echoes_llm(sess, llm):
     picks = sess["picks"]
     cl = card_lore()
+    spoken = _seeker_words(sess)
+    if not _quote_windows(spoken):
+        return None
     lines = "\n".join(
         f'{r}: {picks[r]["name"]} — essence: {cl.get(picks[r]["id"], {}).get("essence", "")}; '
         f'bridge: {cl.get(picks[r]["id"], {}).get("bridge", "")}'
         for r in ("roots", "trunk", "branches"))
     prompt = (
-        "SEEKER'S WORDS (the only source you may quote from):\n"
-        + "\n".join(f"- {s}" for s in sess["shares"])
+        "SEEKER'S ACTUAL WORDS (the only source you may quote from):\n"
+        + "\n".join(f"- {s}" for s in spoken)
         + f"\n\nCARD NOTES (for meaning only — NEVER quote these):\n{lines}\n\n"
         "For each card, write ONE line (under 22 words) the Turtle speaks as that card turns over. "
         "Each line quotes exactly ONE phrase of 3-8 words copied verbatim from SEEKER'S WORDS inside "
-        "'single quotes' — never words from CARD NOTES — then ties that phrase to the card in plain "
+        "curly quotation marks — never words from CARD NOTES — then ties that phrase to the card in plain "
         "speech. No card mechanics, no fortune-telling.\n"
-        "Example shape: You said 'yes to everyone' — and the tide kept none of it for you.\n"
+        "Example shape: You said “yes to everyone” — and the tide kept none of it for you.\n"
         'Return JSON only: {"roots": "...", "trunk": "...", "branches": "..."}'
     )
     resp = llm.generate(prompt, system=SYSTEM, as_json=True, timeout=T_SHORT)
@@ -316,30 +363,33 @@ def _echoes_llm(sess, llm):
         fb = _echoes_fallback(sess)
         result = {}
         for r in ("roots", "trunk", "branches"):
-            line = _clean_line(out[r], 30)
-            result[r] = line if (line and line.count("'") >= 2) else fb[r]
+            line = _clean_line(out[r], 22)
+            result[r] = line if (line and _valid_echo(line, spoken)) else fb[r]
         return result
     return None
 
 
 def _echoes_fallback(sess):
-    sents = [s.strip() for sh in sess["shares"] for s in re.split(r"[.!?,]+", sh) if s.strip()]
-    words = " ".join(sess["shares"]).split()
+    spoken = _seeker_words(sess)
+    windows = _quote_windows(spoken)
     out = {}
     used = set()
-    for i, realm in enumerate(("roots", "trunk", "branches")):
+    for realm in ("roots", "trunk", "branches"):
         c = sess["picks"][realm]
         kw = _tokens(" ".join(c.get("keywords", [])) + " " + c.get("reading", ""))
-        ranked = sorted(sents, key=lambda s: len(_tokens(s) & kw), reverse=True)
-        best = next((s for s in ranked if s not in used), ranked[0] if ranked else "")
-        used.add(best)
-        frag = " ".join(best.split()[:9])
-        if not frag and len(words) > 6:
-            # carve three different windows from one long share
-            third = max(3, len(words) // 3)
-            frag = " ".join(words[i * third:i * third + 8])
-        out[realm] = (f"You said '{frag}…' — the Tree heard it. {c['name']} rose."
-                      if frag else f"The Tree sent up {c['name']}.")
+        ranked = sorted(enumerate(windows), key=lambda x: (-len(_tokens(x[1]) & kw), x[0]))
+        frag = next((phrase for _, phrase in ranked if phrase not in used), "")
+        if frag:
+            used.add(frag)
+        essence = card_lore().get(c["id"], {}).get("essence") or c.get("reading", "")
+        essence_words = essence.split()
+        bite = " ".join(essence_words[:10]).rstrip(" ,;:—-")
+        if len(essence_words) > 10:
+            bite += "…"
+        elif bite and bite[-1] not in ".!?":
+            bite += "."
+        out[realm] = (f"You said “{frag}” — {bite}"
+                      if frag else f"{c['name']} rose. {bite}")
     return out
 
 
@@ -347,7 +397,7 @@ def _draw(sess, llm):
     """THE PLAYA PULLS: pure chance, one card per realm. The AI's craft is the binding,
     not the choosing — meaning is made, not matched."""
     _, _, by_realm = load_deck()
-    told = " ".join(sess["shares"])
+    told = " ".join(_seeker_words(sess)) or "The seeker could not put it into words."
     picks, axis_slot = draw_spread(by_realm)
     sel_mode = "playa"
     located = locate_spread(picks)
@@ -375,6 +425,8 @@ def _draw(sess, llm):
 
 def _refine_llm(sess, llm):
     picks, located = sess["picks"], sess["located"]
+    spoken = _seeker_words(sess)
+    earlier, newest = spoken[:-1], (spoken[-1] if spoken else "")
     lines = []
     for realm in ("roots", "trunk", "branches"):
         c, loc = picks[realm], located.get(realm, {})
@@ -382,8 +434,8 @@ def _refine_llm(sess, llm):
                      f'real_2026="{c["real_2026"]["name"]}" where="{loc.get("directions", "")}"')
     prompt = (
         "The seeker has heard their reading and wants the quest tuned before accepting.\n"
-        f"What they shared earlier:\n" + "\n".join(f"- {s}" for s in sess["shares"][:-1])
-        + f'\n\nWhat they JUST added — the new truth the rewritten quest MUST visibly use:\n"{sess["shares"][-1]}"\n'
+        f"What they shared earlier:\n" + "\n".join(f"- {s}" for s in earlier)
+        + f'\n\nWhat they JUST added — the new truth the rewritten quest MUST visibly use:\n"{newest}"\n'
         + f"\nCONTEXT: {_context(sess)}\n"
         + f"\nThe drawn cards (KEEP these, do not swap):\n" + "\n".join(lines)
         + f"\n\nThe current quest:\n{sess['adventure']}\n\n"
@@ -394,8 +446,10 @@ def _refine_llm(sess, llm):
         "they are keeping secret, the REACH move should be telling one person. Keep the arc: FACE alone "
         "with a hard truth, STAND as presence at a place, REACH involving another human; keep one "
         "leave-something-behind. Concrete, doable, with directions, and as detailed as the quest you are "
-        "replacing — this is a rewrite, not a summary. Also write one short acknowledgement line (under "
-        "20 words) the Turtle says first, naming the new truth.\n"
+        "replacing — this is a rewrite, not a summary. Keep it fit for speech: 75-110 words, one short "
+        "opening, then exactly three compact moves introduced as First, Second, Third. No headings or "
+        "bullets. Also write one short acknowledgement line (under 20 words) the Turtle says first, "
+        "naming the new truth.\n"
         'Return JSON only: {"say": "...", "adventure": "..."}'
     )
     resp = llm.generate(prompt, system=SYSTEM, as_json=True, timeout=T_LONG)
@@ -407,11 +461,8 @@ def _refine_llm(sess, llm):
         return None
     if isinstance(out, dict) and out.get("adventure"):
         adventure = out["adventure"].strip()
-        # A real rewrite doesn't come back dramatically shorter than what it replaced —
-        # that shape is the tell for "paraphrased the old quest" instead of "used the
-        # new truth," which defeats the entire point of asking to go deeper.
-        orig_words = _words(sess["adventure"])
-        if orig_words and _words(adventure) < 0.7 * orig_words:
+        # Reject a summary or a ramble: this whole passage is spoken while the seeker waits.
+        if not 60 <= _words(adventure) <= 140:
             return None
         return {"say": _clean_line(out.get("say"), 30) or random.choice(REFINE_ACKS),
                 "adventure": adventure}
@@ -421,7 +472,7 @@ def _refine_llm(sess, llm):
 def _refine_fallback(sess):
     """No LLM: re-score the realms against the fuller share; the Tree may reconsider a card."""
     _, _, by_realm = load_deck()
-    told = " ".join(sess["shares"])
+    told = " ".join(_seeker_words(sess)) or "The seeker could not put it into words."
     picks = select_fallback(told, by_realm)
     # select_fallback only knows the three Tree realms, so a re-score would quietly swap
     # out an axis card the seeker has already been shown. The Turtle does not take that
@@ -430,7 +481,7 @@ def _refine_fallback(sess):
     if axis_slot and sess.get("picks"):
         picks[axis_slot] = sess["picks"][axis_slot]
     located = locate_spread(picks)
-    out = weave(told, picks, None, located)[0]
+    out = weave(told, picks, None, located, context=_context(sess))[0]
     sess.update(picks=picks, located=located, reading=out["reading"])
     sess["echoes"] = _echoes_fallback(sess)
     return {"say": random.choice(REFINE_ACKS), "adventure": out["adventure"],
