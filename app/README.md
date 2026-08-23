@@ -56,7 +56,7 @@ install Kokoro and SoundFile plus the system `espeak-ng` package while internet 
 then pre-warm the model once before going offline:
 
 ```bash
-python3 -m pip install 'kokoro>=0.9.4' soundfile
+python3 -m pip install -r app/requirements-voice.txt
 # Ubuntu/Debian: sudo apt-get install espeak-ng
 ORACLE_TTS_BACKEND=kokoro PYTHONPATH=app python3 -c \
   'from oracle.voice import KokoroVoice; print(len(KokoroVoice().synthesize("The Turtle wakes.")))'

@@ -1,0 +1,3 @@
+# Optional server voice; the core oracle remains stdlib-only.
+kokoro==0.9.4
+soundfile==0.14.0
