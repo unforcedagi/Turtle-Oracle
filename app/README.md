@@ -65,7 +65,9 @@ ORACLE_TTS_BACKEND=kokoro PYTHONPATH=app python3 -c \
 Run the service with `ORACLE_TTS_BACKEND=kokoro`. Optional controls are
 `ORACLE_TTS_VOICE` (default `bm_george`), `ORACLE_TTS_SPEED` (default `0.86`),
 `ORACLE_TTS_DEVICE` (default `cpu`; use `cuda` only after measuring contention with Ollama),
-and `ORACLE_TTS_CACHE_LINES` (default `192`, memory-only). The kiosk requests one spoken line
+`ORACLE_TTS_MODEL_DIR` (optional directory containing `config.json`, `kokoro-v1_0.pth`, and
+`voices/<voice>.pt` for an explicitly staged offline copy), and `ORACLE_TTS_CACHE_LINES`
+(default `192`, memory-only). The kiosk requests one spoken line
 at a time from `/api/speak`; any load, synthesis, network, or playback failure immediately
 falls back to browser speech. Dynamic WAV responses are marked `no-store` because readings
 can contain a seeker's words.

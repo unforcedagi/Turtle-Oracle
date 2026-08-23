@@ -29,12 +29,14 @@ class KokoroVoice:
         except (TypeError, ValueError):
             self.speed = 0.86
         self.device = device if device is not None else os.environ.get("ORACLE_TTS_DEVICE", "cpu")
+        self.model_dir = os.environ.get("ORACLE_TTS_MODEL_DIR", "").strip()
         try:
             self.cache_size = max(0, int(cache_size if cache_size is not None else
                                          os.environ.get("ORACLE_TTS_CACHE_LINES", "192")))
         except (TypeError, ValueError):
             self.cache_size = 192
         self._pipeline = None
+        self._voice_source = self.voice
         self._cache = OrderedDict()
         self._lock = threading.RLock()
         self._retry_at = 0.0
@@ -50,6 +52,7 @@ class KokoroVoice:
             "ready": bool(self._pipeline) if self.enabled else False,
             "voice": self.voice if self.enabled else None,
             "device": self.device if self.enabled else None,
+            "local_model": bool(self.model_dir) if self.enabled else False,
         }
 
     def _load(self):
@@ -60,9 +63,20 @@ class KokoroVoice:
         if time.monotonic() < self._retry_at:
             raise VoiceUnavailable("server voice is cooling down after a load failure")
         try:
-            from kokoro import KPipeline
+            from kokoro import KModel, KPipeline
             kwargs = {"lang_code": self.lang, "repo_id": "hexgrad/Kokoro-82M"}
-            if self.device:
+            if self.model_dir:
+                config = os.path.join(self.model_dir, "config.json")
+                weights = os.path.join(self.model_dir, "kokoro-v1_0.pth")
+                self._voice_source = os.path.join(self.model_dir, "voices", self.voice + ".pt")
+                for path in (config, weights, self._voice_source):
+                    if not os.path.isfile(path):
+                        raise FileNotFoundError(path)
+                model = KModel(config=config, model=weights)
+                if self.device:
+                    model = model.to(self.device)
+                kwargs["model"] = model.eval()
+            elif self.device:
                 kwargs["device"] = self.device
             self._pipeline = KPipeline(**kwargs)
             self.last_error = None
@@ -101,7 +115,7 @@ class KokoroVoice:
             pipeline = self._load()
             try:
                 chunks = []
-                for result in pipeline(text, voice=self.voice, speed=self.speed,
+                for result in pipeline(text, voice=self._voice_source, speed=self.speed,
                                        split_pattern=r"\n+"):
                     audio = result.audio if hasattr(result, "audio") else result[2]
                     if audio is not None and len(audio):
@@ -123,4 +137,3 @@ class KokoroVoice:
     def warm(self):
         if self.enabled:
             self.synthesize("The Turtle wakes.")
-

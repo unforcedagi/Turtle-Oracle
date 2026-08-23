@@ -25,6 +25,7 @@ class FakePipeline:
 def unit_checks():
     engine = KokoroVoice(backend="kokoro", voice="bm_george", speed=.86, cache_size=2)
     engine._pipeline = FakePipeline()
+    engine._voice_source = "bm_george"
     engine._encode_wav = lambda chunks: b"RIFF-fake-wav-" + bytes([len(chunks[0])])
     first = engine.synthesize("  Slow   is smooth. ")
     second = engine.synthesize("Slow is smooth.")
